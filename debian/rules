@@ -1,0 +1,37 @@
+#!/usr/bin/make -f
+DEB_HOST_ARCH ?= $(shell dpkg-architecture -qDEB_HOST_ARCH)
+
+# The client needs Rust 1.95 or newer, which no suite's rustc provides, so a
+# build-local toolchain is installed with rustup. Crates come from crates.io,
+# pinned by upstream's Cargo.lock (--locked).
+export CARGO_HOME := $(CURDIR)/debian/cargo-home
+export RUSTUP_HOME := $(CURDIR)/debian/rustup-home
+CARGO := $(CARGO_HOME)/bin/cargo
+
+%:
+	dh $@
+
+override_dh_auto_configure:
+
+override_dh_auto_build:
+	@case "$(DEB_HOST_ARCH)" in \
+		amd64|arm64) ;; \
+		*) echo "Unsupported architecture: $(DEB_HOST_ARCH)"; exit 1 ;; \
+	esac
+	wget -q https://sh.rustup.rs -O debian/rustup-init.sh
+	sh debian/rustup-init.sh -y --no-modify-path --profile minimal --default-toolchain stable
+	cd client && $(CARGO) build --release --locked
+
+override_dh_auto_install:
+	install -D -m 755 client/target/release/atuin-ai debian/atuin-ai/usr/bin/atuin-ai
+	install -D -m 644 client/ai.example.toml debian/atuin-ai/usr/share/doc/atuin-ai/examples/ai.example.toml
+
+override_dh_auto_test:
+
+override_dh_auto_clean:
+	rm -rf client/target debian/cargo-home debian/rustup-home debian/rustup-init.sh
+
+override_dh_strip:
+	dh_strip --no-automatic-dbgsym
+
+override_dh_dwz:

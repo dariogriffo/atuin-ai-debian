@@ -1,0 +1,151 @@
+name: Build atuin-ai for Debian
+
+on:
+  workflow_dispatch:
+    inputs:
+      atuin_ai_version:
+        description: Snapshot version, <client version>.<YYYYMMDD> (e.g. 0.1.0.20261127).
+        type: string
+        required: true
+      build_version:
+        description: The build version.
+        type: string
+        required: true
+      upstream_commit:
+        description: Full sha of the atuinsh/atuin-ai commit to build (blank = current main).
+        type: string
+        required: false
+        default: ''
+      architecture:
+        description: Architecture to build (amd64, arm64, or 'all' for both)
+        type: choice
+        default: 'all'
+        options:
+          - 'all'
+          - 'amd64'
+          - 'arm64'
+
+permissions:
+  contents: write
+
+jobs:
+  resolve:
+    name: Resolve upstream commit
+    runs-on: ubuntu-latest
+    outputs:
+      commit: ${{ steps.commit.outputs.commit }}
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - name: Checkout atuin-ai-debian
+        uses: actions/checkout@v4
+
+      - name: Resolve commit
+        id: commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_COMMIT: ${{ inputs.upstream_commit }}
+        run: |
+          set -euo pipefail
+          commit="${INPUT_COMMIT:-$(gh api repos/atuinsh/atuin-ai/commits/main -q .sha)}"
+          [[ "$commit" =~ ^[0-9a-f]{40}$ ]] || { echo "Not a full sha: $commit"; exit 1; }
+          echo "Upstream commit: $commit"
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+
+      - name: Validate upstream license permits paid distribution
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          LICENSE_REF: ${{ steps.commit.outputs.commit }}
+        run: ./validate_license.sh ${{ inputs.atuin_ai_version }}
+
+      - name: Architectures
+        id: matrix
+        env:
+          ARCH: ${{ inputs.architecture }}
+        run: |
+          amd64='{"arch":"amd64","runner":"ubuntu-latest"}'
+          arm64='{"arch":"arm64","runner":"ubuntu-24.04-arm"}'
+          case "$ARCH" in
+            all) m="[$amd64,$arm64]" ;;
+            amd64) m="[$amd64]" ;;
+            arm64) m="[$arm64]" ;;
+          esac
+          echo "matrix={\"include\":$m}" >> "$GITHUB_OUTPUT"
+
+  build-atuin-ai:
+    name: Build ${{ matrix.arch }}
+    needs: resolve
+    strategy:
+      matrix: ${{ fromJSON(needs.resolve.outputs.matrix) }}
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Checkout atuin-ai-debian
+        uses: actions/checkout@v4
+
+      # The client is compiled natively, so each arch builds on its own runner
+      - name: Build atuin-ai
+        run: ./build_debian.sh ${{ inputs.atuin_ai_version }} ${{ inputs.build_version }} ${{ matrix.arch }} ${{ needs.resolve.outputs.commit }}
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: artifact-${{ matrix.arch }}
+          path: atuin-ai_*.deb
+
+  build-src:
+    name: Build Source Packages
+    needs: resolve
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout atuin-ai-debian
+        uses: actions/checkout@v4
+
+      - name: Install dpkg-dev and tools
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends dpkg-dev devscripts wget ca-certificates
+
+      - name: Build source packages
+        run: ./build_src.sh ${{ inputs.atuin_ai_version }} ${{ inputs.build_version }} ${{ needs.resolve.outputs.commit }}
+
+      - name: Upload source artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: source-artifact
+          path: |
+            atuin-ai_*.dsc
+            atuin-ai_*.orig.tar.gz
+            atuin-ai_*.debian.tar.xz
+
+  release-atuin-ai:
+    name: Release atuin-ai for Debian
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    needs: [resolve, build-atuin-ai, build-src]
+    steps:
+      - name: Download All Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: artifact-*
+          merge-multiple: true
+
+      - name: Download Source Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: source-artifact
+
+      # check-upstream.yml reads the commit back from this body: keep the line
+      - name: Publish Release
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: false
+          files: |
+            atuin-ai_*.deb
+            atuin-ai_*.dsc
+            atuin-ai_*.orig.tar.gz
+            atuin-ai_*.debian.tar.xz
+          name: ${{ inputs.atuin_ai_version }}+${{ inputs.build_version }}
+          tag_name: ${{ inputs.atuin_ai_version }}+${{ inputs.build_version }}
+          body: |
+            Weekly snapshot of the Atuin AI client.
+
+            Upstream commit: ${{ needs.resolve.outputs.commit }}
+            https://github.com/atuinsh/atuin-ai/commit/${{ needs.resolve.outputs.commit }}
+          fail_on_unmatched_files: true

@@ -1,0 +1,20 @@
+Source: atuin-ai
+Section: utils
+Priority: optional
+Maintainer: Dario Griffo <dariogriffo@gmail.com>
+Homepage: https://github.com/atuinsh/atuin-ai
+Package: atuin-ai
+Version: atuin_ai_VERSION-BUILD_VERSION~griffo
+Architecture: SUPPORTED_ARCHITECTURES
+Depends: ATUIN_AI_DEPENDS
+Description: AI shell agent for Atuin, talking to a self-hosted server
+ Atuin AI is the shell agent Atuin shipped up to 18.24, now a standalone
+ binary. Press ? at an empty prompt to chat: it suggests commands and answers
+ questions, and with your permission it can search your Atuin history, read
+ and edit files, and run commands.
+ .
+ It needs an Atuin AI server, which you host yourself (upstream publishes a
+ Docker image), backed by any OpenAI-compatible endpoint. Set endpoint in
+ ~/.atuin/ai.toml, then add eval "$(atuin-ai init bash)" (or zsh, fish) after
+ Atuin's own init. This package is a weekly snapshot of upstream's main
+ branch, which has no releases.

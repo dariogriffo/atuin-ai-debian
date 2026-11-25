@@ -1,0 +1,88 @@
+name: Weekly atuin-ai snapshot
+
+on:
+  schedule:
+    # Fridays, 06:00 UTC. Upstream has no releases: build main when it moved.
+    - cron: "0 6 * * 5"
+  workflow_dispatch: {}
+
+concurrency:
+  group: check-upstream
+  cancel-in-progress: false
+
+permissions:
+  contents: write  # the keep-alive commit below
+  actions: write   # required to dispatch release.yml
+
+jobs:
+  check:
+    name: Compare upstream main vs published
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout atuin-ai-debian
+        uses: actions/checkout@v4
+
+      - name: Detect and dispatch
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          UPSTREAM_REPO="atuinsh/atuin-ai"
+
+          up_sha=$(gh api "repos/${UPSTREAM_REPO}/commits/main" -q .sha)
+          [[ "$up_sha" =~ ^[0-9a-f]{40}$ ]] || { echo "Could not read ${UPSTREAM_REPO} main; aborting."; exit 1; }
+          echo "Upstream main: ${up_sha}"
+
+          # Our latest release names the commit it was built from in its body
+          ours=$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest" -q .body 2>/dev/null \
+            | sed -n 's/^Upstream commit: \([0-9a-f]\{40\}\).*/\1/p' | head -1 || true)
+          echo "Ours: ${ours:-<none>}"
+
+          if [ "$up_sha" = "$ours" ]; then
+            echo "Up to date."
+            exit 0
+          fi
+
+          # Don't dispatch a duplicate while a build is already running/queued.
+          active=$(gh run list --workflow=release.yml --json status \
+            -q '[.[] | select(.status == "in_progress" or .status == "queued")] | length')
+          if [ "$active" -gt 0 ]; then
+            echo "A release.yml run is already active ($active); skipping."
+            exit 0
+          fi
+
+          # Version: the client's version at that commit, then today's date
+          cargo_ver=$(gh api "repos/${UPSTREAM_REPO}/contents/client/Cargo.toml?ref=${up_sha}" \
+            -H 'Accept: application/vnd.github.raw' | sed -n 's/^version = "\(.*\)"$/\1/p' | head -1)
+          [[ "$cargo_ver" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "Unexpected client version '${cargo_ver}'; aborting."; exit 1; }
+          ver="${cargo_ver}.$(date -u +%Y%m%d)"
+
+          # One snapshot per day: a version maps to one commit (and one orig
+          # tarball, which the mirror's pool requires). A build-number bump of
+          # an existing snapshot is a manual release.yml run with its commit.
+          if gh release view "${ver}+1" >/dev/null 2>&1; then
+            echo "Today's snapshot ${ver} already exists; the next run picks up ${up_sha}."
+            exit 0
+          fi
+
+          echo "Upstream moved: ${ours:-<none>} -> ${up_sha}. Dispatching ${ver}+1."
+          gh workflow run release.yml -f atuin_ai_version="${ver}" -f build_version=1 \
+            -f upstream_commit="${up_sha}" -f architecture=all
+
+      # GitHub disables scheduled workflows after 60 days without a commit,
+      # and releases don't count. Push an empty commit when the last one is
+      # 45 days old, so a quiet upstream doesn't stop the weekly build.
+      - name: Keep the schedule alive
+        run: |
+          set -euo pipefail
+          last=$(git log -1 --format=%ct)
+          age_days=$(( ($(date +%s) - last) / 86400 ))
+          echo "Last commit: ${age_days} days ago"
+          if [ "$age_days" -ge 45 ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git commit --allow-empty -m "Keep the weekly snapshot schedule enabled"
+            git push
+          fi
